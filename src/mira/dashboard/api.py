@@ -356,6 +356,8 @@ class ModelOption(BaseModel):
 class ModelsResponse(BaseModel):
     indexing_model: str
     review_model: str
+    base_url: str
+    api_key_env: str
     indexing_options: list[ModelOption]
     review_options: list[ModelOption]
 
@@ -363,6 +365,8 @@ class ModelsResponse(BaseModel):
 class ModelsUpdate(BaseModel):
     indexing_model: str
     review_model: str
+    base_url: str | None = None
+    api_key_env: str | None = None
 
 
 @router.get("/api/settings/models", response_model=ModelsResponse)
@@ -382,6 +386,8 @@ def get_models() -> ModelsResponse:
     return ModelsResponse(
         indexing_model=indexing,
         review_model=review,
+        base_url=config.llm.base_url,
+        api_key_env=config.llm.api_key_env,
         indexing_options=[ModelOption(**m) for m in INDEXING_MODELS],
         review_options=[ModelOption(**m) for m in REVIEW_MODELS],
     )
@@ -485,23 +491,58 @@ def set_global_settings(body: GlobalSettingsUpdate, request: Request) -> dict:
 
 @router.put("/api/settings/models")
 def set_models(body: ModelsUpdate) -> dict:
+    from pydantic import ValidationError
+
+    from mira.config import LLMConfig, load_config
+    from mira.llm.provider import _is_openrouter
     from mira.llm.registry import is_supported
+
+    config = load_config()
+    base_url = body.base_url if body.base_url is not None else config.llm.base_url
+    api_key_env = body.api_key_env if body.api_key_env is not None else config.llm.api_key_env
+
+    def _validate_endpoint_settings() -> None:
+        try:
+            LLMConfig(model="validation-placeholder", base_url=base_url, api_key_env=api_key_env)
+        except ValidationError as exc:
+            first = exc.errors()[0]
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "field": str(first.get("loc", ("llm",))[0]),
+                    "message": _humanize_pydantic_message(first),
+                },
+            ) from exc
+
+    def _validate_model_value(model_id: str, field: str) -> str:
+        model_id = model_id.strip()
+        if not model_id:
+            raise HTTPException(
+                status_code=400,
+                detail={"field": field, "message": "must not be empty"},
+            )
+        return model_id
+
+    _validate_endpoint_settings()
+    indexing_model = _validate_model_value(body.indexing_model, "indexing_model")
+    review_model = _validate_model_value(body.review_model, "review_model")
 
     # Reject unsupported or wrong-purpose models. Without this, an admin can
     # silently configure a model that's broken (no JSON mode, missing from
     # the registry, miscategorized for the role).
-    if not is_supported(body.indexing_model, purpose="indexing"):
+    if _is_openrouter(base_url) and not is_supported(indexing_model, purpose="indexing"):
         raise HTTPException(
             status_code=400,
-            detail=f"{body.indexing_model!r} is not a supported indexing model.",
+            detail=f"{indexing_model!r} is not a supported indexing model.",
         )
-    if not is_supported(body.review_model, purpose="review"):
+    if _is_openrouter(base_url) and not is_supported(review_model, purpose="review"):
         raise HTTPException(
             status_code=400,
-            detail=f"{body.review_model!r} is not a supported review model.",
+            detail=f"{review_model!r} is not a supported review model.",
         )
-    _app_db.set_setting("indexing_model", body.indexing_model)
-    _app_db.set_setting("review_model", body.review_model)
+    _app_db.set_setting("indexing_model", indexing_model)
+    _app_db.set_setting("review_model", review_model)
+    _app_db.set_llm_settings(base_url=base_url, api_key_env=api_key_env)
     _app_db.mark_setup_complete()
     return {"ok": True}
 

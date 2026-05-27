@@ -2,10 +2,18 @@
 # Copy this to .mira.yaml in your repository root
 
 llm:
-  # Model identifier (any LiteLLM-supported model)
+  # Model identifier. Known OpenRouter models appear in the dashboard dropdown,
+  # but any string is allowed when you point Mira at a custom OpenAI-compatible
+  # endpoint such as Ollama, SGLang, or vLLM.
   model: "openai/gpt-4o"
   # Fallback model if primary fails
   fallback_model: "openai/gpt-4o-mini"
+  # Base URL for an OpenAI-compatible chat-completions API.
+  # OpenRouter default:
+  base_url: "https://openrouter.ai/api/v1"
+  # Environment variable containing the bearer token. Set to "" for local
+  # endpoints that do not require auth.
+  api_key_env: "OPENROUTER_API_KEY"
   temperature: 0.2
   max_tokens: 4096
 
@@ -48,3 +56,23 @@ review:
   walkthrough: true
   # Include a Mermaid sequence diagram in the walkthrough
   walkthrough_sequence_diagram: true
+
+# Examples:
+#
+# OpenRouter (default)
+# llm:
+#   model: "anthropic/claude-sonnet-4-6"
+#   base_url: "https://openrouter.ai/api/v1"
+#   api_key_env: "OPENROUTER_API_KEY"
+#
+# Ollama
+# llm:
+#   model: "llama3.1:70b"
+#   base_url: "http://localhost:11434/v1"
+#   api_key_env: ""
+#
+# SGLang
+# llm:
+#   model: "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+#   base_url: "http://localhost:30000/v1"
+#   api_key_env: ""

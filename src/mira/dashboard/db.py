@@ -830,6 +830,8 @@ class AppDatabase:
     # JSON-blobbed under one settings row — schema doesn't churn when
     # ReviewConfig / FilterConfig grow new fields.
     _GLOBAL_OVERRIDES_KEY = "global_review_overrides"
+    _LLM_BASE_URL_KEY = "llm_base_url"
+    _LLM_API_KEY_ENV_KEY = "llm_api_key_env"
 
     def get_global_review_overrides(self) -> dict[str, Any]:
         """Return the admin-set runtime overrides, or {} if none."""
@@ -845,6 +847,22 @@ class AppDatabase:
     def set_global_review_overrides(self, overrides: dict[str, Any]) -> None:
         """Replace the admin-set runtime overrides. Pass `{}` to clear."""
         self.set_setting(self._GLOBAL_OVERRIDES_KEY, json.dumps(overrides))
+
+    def get_llm_settings(self) -> dict[str, str]:
+        """Return persisted non-secret LLM endpoint settings."""
+        data: dict[str, str] = {}
+        base_url = self.get_setting(self._LLM_BASE_URL_KEY)
+        api_key_env = self.get_setting(self._LLM_API_KEY_ENV_KEY)
+        if base_url is not None:
+            data["base_url"] = base_url
+        if api_key_env is not None:
+            data["api_key_env"] = api_key_env
+        return data
+
+    def set_llm_settings(self, *, base_url: str, api_key_env: str) -> None:
+        """Persist non-secret LLM endpoint settings."""
+        self.set_setting(self._LLM_BASE_URL_KEY, base_url)
+        self.set_setting(self._LLM_API_KEY_ENV_KEY, api_key_env)
 
     def mark_setup_complete(self) -> None:
         self.set_setting("setup_complete", "true")

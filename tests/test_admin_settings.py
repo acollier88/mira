@@ -19,8 +19,11 @@ from mira.config import load_config, set_global_defaults
 from mira.dashboard.api import (
     _ALLOWED_OVERRIDE_SECTIONS,
     GlobalSettingsUpdate,
+    ModelsUpdate,
     get_global_settings,
+    get_models,
     set_global_settings,
+    set_models,
 )
 from mira.dashboard.db import AppDatabase
 
@@ -76,6 +79,13 @@ class TestDBRoundTrip:
         in_memory_db.set_setting("global_review_overrides", "{not json}")
         assert in_memory_db.get_global_review_overrides() == {}
 
+    def test_llm_settings_round_trip(self, in_memory_db: AppDatabase):
+        in_memory_db.set_llm_settings(base_url="http://localhost:11434/v1", api_key_env="")
+        assert in_memory_db.get_llm_settings() == {
+            "base_url": "http://localhost:11434/v1",
+            "api_key_env": "",
+        }
+
 
 class TestLoadConfigDbLayer:
     """`load_config()` lazy-imports `_app_db` and merges its overrides."""
@@ -106,6 +116,12 @@ class TestLoadConfigDbLayer:
 
         cfg = load_config(repo_yaml)
         assert cfg.filter.max_comments == 99  # per-repo > DB > global
+
+    def test_db_llm_settings_layer_into_load_config(self, in_memory_db: AppDatabase):
+        in_memory_db.set_llm_settings(base_url="http://localhost:11434/v1", api_key_env="")
+        cfg = load_config()
+        assert cfg.llm.base_url == "http://localhost:11434/v1"
+        assert cfg.llm.api_key_env == ""
 
 
 class TestEndpointAuthorization:
@@ -168,6 +184,63 @@ class TestEndpointValidation:
 
     def test_allowed_sections_constant(self):
         assert {"filter", "review"} == _ALLOWED_OVERRIDE_SECTIONS
+
+
+class TestModelSettingsEndpoint:
+    def test_get_models_includes_endpoint_settings(self, in_memory_db: AppDatabase):
+        in_memory_db.set_llm_settings(base_url="http://localhost:11434/v1", api_key_env="")
+
+        resp = get_models()
+
+        assert resp.base_url == "http://localhost:11434/v1"
+        assert resp.api_key_env == ""
+
+    def test_set_models_accepts_custom_models_for_custom_endpoint(self, in_memory_db: AppDatabase):
+        result = set_models(
+            ModelsUpdate(
+                indexing_model="llama3.1:8b",
+                review_model="llama3.1:70b",
+                base_url="http://localhost:11434/v1",
+                api_key_env="",
+            )
+        )
+
+        assert result == {"ok": True}
+        assert in_memory_db.get_setting("indexing_model") == "llama3.1:8b"
+        assert in_memory_db.get_setting("review_model") == "llama3.1:70b"
+        assert in_memory_db.get_llm_settings() == {
+            "base_url": "http://localhost:11434/v1",
+            "api_key_env": "",
+        }
+
+    def test_set_models_rejects_unknown_openrouter_model(self, in_memory_db: AppDatabase):
+        with pytest.raises(HTTPException) as exc:
+            set_models(
+                ModelsUpdate(
+                    indexing_model="custom/indexing",
+                    review_model="custom/review",
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key_env="OPENROUTER_API_KEY",
+                )
+            )
+        assert exc.value.status_code == 400
+        assert "supported indexing model" in exc.value.detail
+
+    def test_set_models_rejects_invalid_base_url(self, in_memory_db: AppDatabase):
+        with pytest.raises(HTTPException) as exc:
+            set_models(
+                ModelsUpdate(
+                    indexing_model="llama3.1:8b",
+                    review_model="llama3.1:70b",
+                    base_url="not-a-url",
+                    api_key_env="",
+                )
+            )
+        assert exc.value.status_code == 400
+        assert exc.value.detail == {
+            "field": "base_url",
+            "message": "Value error, must be a valid http(s) URL",
+        }
 
 
 class TestVersionEndpoint:

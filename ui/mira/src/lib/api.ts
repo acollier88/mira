@@ -2,6 +2,35 @@
 // In dev, set VITE_API_URL=http://localhost:8100 in ui/mira/.env.local.
 const API_BASE = import.meta.env.VITE_API_URL || ""
 
+export interface ModelSettings {
+  indexing_model: string
+  review_model: string
+  base_url: string
+  api_key_env: string
+  indexing_options: { value: string; label: string; recommended?: boolean }[]
+  review_options: { value: string; label: string; recommended?: boolean }[]
+}
+
+export function parseApiError(
+  err: unknown,
+): { field?: string; message: string } {
+  const raw = err instanceof Error ? err.message : String(err)
+  try {
+    const parsed = JSON.parse(raw.replace(/^API error \d+: /, "")) as {
+      detail?: { field?: string; message?: string }
+    }
+    if (parsed?.detail?.message) {
+      return {
+        field: parsed.detail.field,
+        message: parsed.detail.message,
+      }
+    }
+  } catch {
+    // Fall through to the raw message below.
+  }
+  return { message: raw }
+}
+
 async function fetchJson<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { credentials: "include" })
   if (!res.ok) {
@@ -288,12 +317,7 @@ export const api = {
     ),
 
   getModels: () =>
-    fetchJson<{
-      indexing_model: string
-      review_model: string
-      indexing_options: { value: string; label: string; recommended?: boolean }[]
-      review_options: { value: string; label: string; recommended?: boolean }[]
-    }>("/api/settings/models"),
+    fetchJson<ModelSettings>("/api/settings/models"),
 
   getCostEstimate: () =>
     fetchJson<{
@@ -316,10 +340,17 @@ export const api = {
   saveGlobalSettings: (overrides: Record<string, Record<string, number | boolean | string>>) =>
     putJson<{ ok: boolean }>("/api/admin/settings", { overrides }),
 
-  saveModels: (indexing_model: string, review_model: string) =>
+  saveModels: ({
+    indexing_model,
+    review_model,
+    base_url,
+    api_key_env,
+  }: Pick<ModelSettings, "indexing_model" | "review_model" | "base_url" | "api_key_env">) =>
     putJson<{ ok: boolean }>("/api/settings/models", {
       indexing_model,
       review_model,
+      base_url,
+      api_key_env,
     }),
 
   completeSetup: (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 
@@ -310,6 +311,80 @@ def _strip_model_prefix(model: str, base_url: str) -> str:
     return model
 
 
+def _extract_error_message(resp: httpx.Response) -> str:
+    """Best-effort extraction of a provider error message."""
+    try:
+        data = resp.json()
+    except Exception:
+        return resp.text
+
+    if isinstance(data, dict):
+        for key in ("error", "message", "detail"):
+            value = data.get(key)
+            if isinstance(value, str):
+                return value
+            if isinstance(value, dict):
+                nested = value.get("message") or value.get("detail")
+                if isinstance(nested, str):
+                    return nested
+    return resp.text
+
+
+def _error_kind(status_code: int, message: str) -> str | None:
+    lower = message.lower()
+    if status_code in (401, 403) or any(
+        token in lower
+        for token in ("unauthorized", "authentication", "invalid api key", "invalid_api_key")
+    ):
+        return "auth"
+    if any(
+        token in lower
+        for token in ("response_format", "json_object", "json mode", "json schema")
+    ):
+        return "json_mode"
+    if any(
+        token in lower
+        for token in (
+            "tool_choice",
+            "tool call",
+            "tool_calls",
+            "function calling",
+            "function_call",
+            "tools are not supported",
+        )
+    ):
+        return "tool_calling"
+    return None
+
+
+def _format_api_error(status_code: int, message: str) -> str:
+    kind = _error_kind(status_code, message)
+    if kind == "auth":
+        return f"LLM authentication failed ({status_code}): {message}"
+    if kind == "json_mode":
+        return f"LLM endpoint does not support JSON mode ({status_code}): {message}"
+    if kind == "tool_calling":
+        return f"LLM endpoint does not support tool calling ({status_code}): {message}"
+    return f"LLM API error {status_code}: {message}"
+
+
+def _force_json_messages(
+    messages: list[dict[str, str]],
+    schema_hint: dict | None = None,
+) -> list[dict[str, str]]:
+    """Append a portability fallback instruction for endpoints without structured-output support."""
+    prompt = "Return ONLY a valid JSON object. Do not include markdown fences or extra prose."
+    if schema_hint is not None:
+        prompt += f" Match this JSON schema: {json.dumps(schema_hint, sort_keys=True)}"
+    return [
+        *messages,
+        {
+            "role": "system",
+            "content": prompt,
+        },
+    ]
+
+
 class LLMProvider:
     """Direct OpenRouter API client for LLM completions."""
 
@@ -317,6 +392,8 @@ class LLMProvider:
         self.config = config
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        self._supports_json_mode: bool | None = None
+        self._supports_tool_calling: bool | None = None
 
     def _chat_url(self) -> str:
         return f"{self.config.base_url.rstrip('/')}/chat/completions"
@@ -338,6 +415,20 @@ class LLMProvider:
         self._cached_headers = headers
         return dict(headers)
 
+    async def _post_chat(self, body: dict) -> httpx.Response:
+        async with httpx.AsyncClient(timeout=120) as client:
+            return await client.post(
+                self._chat_url(),
+                headers=self._build_headers(),
+                json=body,
+            )
+
+    def _track_usage(self, data: dict) -> None:
+        usage = data.get("usage")
+        if usage:
+            self.total_prompt_tokens += usage.get("prompt_tokens", 0)
+            self.total_completion_tokens += usage.get("completion_tokens", 0)
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=30),
@@ -353,32 +444,43 @@ class LLMProvider:
         max_tokens: int | None = None,
     ) -> str:
         """Make a single LLM call with retries against the configured endpoint."""
+        request_messages = messages
         body: dict = {
             "model": _strip_model_prefix(model, self.config.base_url),
-            "messages": messages,
+            "messages": request_messages,
             "temperature": temperature if temperature is not None else self.config.temperature,
             "max_tokens": max_tokens if max_tokens is not None else self.config.max_tokens,
         }
-        if json_mode:
+        if json_mode and self._supports_json_mode is False:
+            request_messages = _force_json_messages(messages)
+            body["messages"] = request_messages
+        elif json_mode:
             body["response_format"] = {"type": "json_object"}
 
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                self._chat_url(),
-                headers=self._build_headers(),
-                json=body,
-            )
-            if resp.status_code != 200:
-                raise LLMError(f"LLM API error {resp.status_code}: {resp.text}")
-            data = resp.json()
+        resp = await self._post_chat(body)
+        if resp.status_code != 200:
+            message = _extract_error_message(resp)
+            if json_mode and _error_kind(resp.status_code, message) == "json_mode":
+                logger.warning(
+                    "Endpoint %s rejected JSON mode; retrying with prompt-only JSON fallback",
+                    self.config.base_url,
+                )
+                self._supports_json_mode = False
+                fallback_body = dict(body)
+                fallback_body.pop("response_format", None)
+                fallback_body["messages"] = _force_json_messages(messages)
+                resp = await self._post_chat(fallback_body)
+                if resp.status_code != 200:
+                    raise LLMError(_format_api_error(resp.status_code, _extract_error_message(resp)))
+            else:
+                raise LLMError(_format_api_error(resp.status_code, message))
+        else:
+            if json_mode and self._supports_json_mode is None:
+                self._supports_json_mode = True
+        data = resp.json()
 
         content = data["choices"][0]["message"].get("content") or ""
-
-        # Track usage
-        usage = data.get("usage")
-        if usage:
-            self.total_prompt_tokens += usage.get("prompt_tokens", 0)
-            self.total_completion_tokens += usage.get("completion_tokens", 0)
+        self._track_usage(data)
 
         return content
 
@@ -400,30 +502,51 @@ class LLMProvider:
         The LLM returns structured data by 'calling' a tool. We extract the
         tool arguments as the JSON response.
         """
+        request_messages = messages
         body: dict = {
             "model": _strip_model_prefix(model, self.config.base_url),
-            "messages": messages,
-            "tools": tools,
-            "tool_choice": {"type": "function", "function": {"name": tools[0]["function"]["name"]}},
+            "messages": request_messages,
             "temperature": temperature if temperature is not None else self.config.temperature,
             "max_tokens": self.config.max_tokens,
         }
+        if self._supports_tool_calling is False:
+            request_messages = _force_json_messages(messages, schema_hint=tools[0]["function"]["parameters"])
+            body["messages"] = request_messages
+        else:
+            body["tools"] = tools
+            body["tool_choice"] = {
+                "type": "function",
+                "function": {"name": tools[0]["function"]["name"]},
+            }
 
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                self._chat_url(),
-                headers=self._build_headers(),
-                json=body,
-            )
-            if resp.status_code != 200:
-                raise LLMError(f"LLM API error {resp.status_code}: {resp.text}")
-            data = resp.json()
-
-        # Track usage
-        usage = data.get("usage")
-        if usage:
-            self.total_prompt_tokens += usage.get("prompt_tokens", 0)
-            self.total_completion_tokens += usage.get("completion_tokens", 0)
+        resp = await self._post_chat(body)
+        if resp.status_code != 200:
+            message = _extract_error_message(resp)
+            if _error_kind(resp.status_code, message) == "tool_calling":
+                logger.warning(
+                    "Endpoint %s rejected tool calling; retrying with prompt-only JSON fallback",
+                    self.config.base_url,
+                )
+                self._supports_tool_calling = False
+                fallback_body = {
+                    "model": _strip_model_prefix(model, self.config.base_url),
+                    "messages": _force_json_messages(
+                        messages,
+                        schema_hint=tools[0]["function"]["parameters"],
+                    ),
+                    "temperature": temperature if temperature is not None else self.config.temperature,
+                    "max_tokens": self.config.max_tokens,
+                }
+                resp = await self._post_chat(fallback_body)
+                if resp.status_code != 200:
+                    raise LLMError(_format_api_error(resp.status_code, _extract_error_message(resp)))
+            else:
+                raise LLMError(_format_api_error(resp.status_code, message))
+        else:
+            if self._supports_tool_calling is None and "tools" in body:
+                self._supports_tool_calling = True
+        data = resp.json()
+        self._track_usage(data)
 
         # Extract tool call arguments
         message = data["choices"][0]["message"]
@@ -433,13 +556,18 @@ class LLMProvider:
             return tool_calls[0]["function"]["arguments"]
 
         # Fallback: if the model returned content instead of a tool call,
-        # return the content as-is (some models may not support tool calling)
+        # return the content as-is (some models may accept tools but answer
+        # with raw JSON content instead of a formal tool call envelope).
         content = message.get("content") or ""
         if content:
+            self._supports_tool_calling = False
             logger.warning("Model returned content instead of tool call, using content as fallback")
             return content
 
-        raise LLMError("Model returned neither tool call nor content")
+        raise LLMError(
+            "LLM endpoint returned neither tool calls nor JSON content. "
+            "Verify OpenAI-compatible chat-completions support."
+        )
 
     async def complete(
         self,
@@ -519,20 +647,11 @@ class LLMProvider:
             "max_tokens": self.config.max_tokens,
         }
 
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                self._chat_url(),
-                headers=self._build_headers(),
-                json=body,
-            )
-            if resp.status_code != 200:
-                raise LLMError(f"LLM API error {resp.status_code}: {resp.text}")
-            data = resp.json()
-
-        usage = data.get("usage")
-        if usage:
-            self.total_prompt_tokens += usage.get("prompt_tokens", 0)
-            self.total_completion_tokens += usage.get("completion_tokens", 0)
+        resp = await self._post_chat(body)
+        if resp.status_code != 200:
+            raise LLMError(_format_api_error(resp.status_code, _extract_error_message(resp)))
+        data = resp.json()
+        self._track_usage(data)
 
         return data["choices"][0]["message"]
 
