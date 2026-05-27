@@ -6,9 +6,10 @@ import logging
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from mira.exceptions import ConfigError
 
@@ -35,6 +36,33 @@ class LLMConfig(BaseModel):
     # for local endpoints that don't require auth.
     base_url: str = "https://openrouter.ai/api/v1"
     api_key_env: str = "OPENROUTER_API_KEY"
+
+    @field_validator("model")
+    @classmethod
+    def _validate_model(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be empty")
+        return value
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be empty")
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("must be a valid http(s) URL")
+        return value.rstrip("/")
+
+    @field_validator("api_key_env")
+    @classmethod
+    def _validate_api_key_env(cls, value: str) -> str:
+        value = value.strip()
+        if any(ch.isspace() for ch in value):
+            raise ValueError("must not contain whitespace")
+        return value
 
 
 class FilterConfig(BaseModel):
@@ -226,6 +254,9 @@ def load_config(
             db_overrides = _app_db.get_global_review_overrides()
             if db_overrides:
                 data = _deep_merge(data, db_overrides)
+            llm_settings = _app_db.get_llm_settings()
+            if llm_settings:
+                data = _deep_merge(data, {"llm": llm_settings})
     except Exception as _db_exc:  # noqa: BLE001
         logger.debug("load_config: skipping DB overrides (%s)", _db_exc)
 

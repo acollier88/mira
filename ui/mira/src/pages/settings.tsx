@@ -25,6 +25,9 @@ export function SettingsPage() {
 
   const [indexingModel, setIndexingModel] = useState("")
   const [reviewModel, setReviewModel] = useState("")
+  const [baseUrl, setBaseUrl] = useState("")
+  const [apiKeyEnv, setApiKeyEnv] = useState("OPENROUTER_API_KEY")
+  const [authMode, setAuthMode] = useState<"bearer" | "none">("bearer")
   const [indexingOptions, setIndexingOptions] = useState<
     { value: string; label: string; recommended?: boolean }[]
   >([])
@@ -33,6 +36,7 @@ export function SettingsPage() {
   >([])
   const [savingModels, setSavingModels] = useState(false)
   const [modelsSaved, setModelsSaved] = useState(false)
+  const [modelError, setModelError] = useState("")
 
   const [effective, setEffective] = useState<{
     filter?: Record<string, number | boolean | string>
@@ -59,6 +63,9 @@ export function SettingsPage() {
     api.getModels().then((m) => {
       setIndexingModel(m.indexing_model)
       setReviewModel(m.review_model)
+      setBaseUrl(m.base_url)
+      setApiKeyEnv(m.api_key_env || "OPENROUTER_API_KEY")
+      setAuthMode(m.api_key_env === "" ? "none" : "bearer")
       setIndexingOptions(m.indexing_options)
       setReviewOptions(m.review_options)
     })
@@ -83,11 +90,35 @@ export function SettingsPage() {
 
   const saveModels = async () => {
     setSavingModels(true)
-    await api.saveModels(indexingModel, reviewModel)
-    setSavingModels(false)
-    setModelsSaved(true)
-    setTimeout(() => setModelsSaved(false), 2000)
+    setModelError("")
+    try {
+      await api.saveModels({
+        indexing_model: indexingModel,
+        review_model: reviewModel,
+        base_url: baseUrl,
+        api_key_env: authMode === "none" ? "" : apiKeyEnv,
+      })
+      setModelsSaved(true)
+      setTimeout(() => setModelsSaved(false), 2000)
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err)
+      let parsedError: { detail?: { field?: string; message: string } } | null = null
+      try { parsedError = JSON.parse(raw.replace(/^API error \d+: /, "")) } catch { /* ignore */ }
+      const detail = parsedError?.detail
+      setModelError(
+        detail && typeof detail === "object" && "message" in detail
+          ? `${detail.field ? `${detail.field}: ` : ""}${detail.message}`
+          : raw,
+      )
+    } finally {
+      setSavingModels(false)
+    }
   }
+
+  const knownModelValue = (
+    value: string,
+    options: { value: string; label: string; recommended?: boolean }[],
+  ) => (options.some((opt) => opt.value === value) ? value : undefined)
 
   const setOverride = (
     section: "filter" | "review",
@@ -280,15 +311,18 @@ export function SettingsPage() {
         <CardHeader>
           <CardTitle>Models</CardTitle>
           <CardDescription>
-            Choose models for indexing and PR reviews
+            Choose known models or enter custom model IDs for your OpenAI-compatible endpoint
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
             <label className="text-sm font-medium">Indexing Model</label>
-            <Select value={indexingModel} onValueChange={setIndexingModel}>
+            <Select
+              value={knownModelValue(indexingModel, indexingOptions)}
+              onValueChange={setIndexingModel}
+            >
               <SelectTrigger>
-                <SelectValue />
+                <SelectValue placeholder="Select a known indexing model" />
               </SelectTrigger>
               <SelectContent>
                 {indexingOptions.map((opt) => (
@@ -307,12 +341,20 @@ export function SettingsPage() {
               Used to summarize files when building the code index. A cheaper
               model is recommended since it runs over every file.
             </p>
+            <Input
+              value={indexingModel}
+              onChange={(e) => setIndexingModel(e.target.value)}
+              placeholder="Custom indexing model ID (for example llama3.1:8b or Qwen/Qwen3-Coder-30B-A3B-Instruct)"
+            />
           </div>
           <div className="space-y-2">
             <label className="text-sm font-medium">Review Model</label>
-            <Select value={reviewModel} onValueChange={setReviewModel}>
+            <Select
+              value={knownModelValue(reviewModel, reviewOptions)}
+              onValueChange={setReviewModel}
+            >
               <SelectTrigger>
-                <SelectValue />
+                <SelectValue placeholder="Select a known review model" />
               </SelectTrigger>
               <SelectContent>
                 {reviewOptions.map((opt) => (
@@ -331,7 +373,57 @@ export function SettingsPage() {
               Used to analyze PRs and post review comments. A more powerful
               model gives better review quality.
             </p>
+            <Input
+              value={reviewModel}
+              onChange={(e) => setReviewModel(e.target.value)}
+              placeholder="Custom review model ID (for example llama3.1:70b or deepseek-ai/DeepSeek-V3)"
+            />
           </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Endpoint base URL</label>
+            <Input
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              placeholder="https://openrouter.ai/api/v1"
+            />
+            <p className="text-xs text-muted-foreground">
+              Mira appends <code className="text-xs">/chat/completions</code>. Point this at OpenRouter, Ollama, SGLang, vLLM, or another OpenAI-compatible server.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Authentication</label>
+            <Select
+              value={authMode}
+              onValueChange={(value) => setAuthMode(value as "bearer" | "none")}
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="bearer">****** from environment</SelectItem>
+                <SelectItem value="none">No auth</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Use no auth for local endpoints like Ollama when they do not require an API key.
+            </p>
+          </div>
+          {authMode === "bearer" && (
+            <div className="space-y-2">
+              <label className="text-sm font-medium">API key env var</label>
+              <Input
+                value={apiKeyEnv}
+                onChange={(e) => setApiKeyEnv(e.target.value)}
+                placeholder="OPENROUTER_API_KEY"
+              />
+              <p className="text-xs text-muted-foreground">
+                Mira reads the token from this environment variable at runtime. Secrets stay out of the database.
+              </p>
+            </div>
+          )}
+          {modelError && (
+            <p className="text-xs text-destructive break-words">{modelError}</p>
+          )}
           <div className="flex items-center gap-3">
             <Button size="sm" onClick={saveModels} disabled={savingModels}>
               {savingModels && (
