@@ -18,7 +18,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { api } from "@/lib/api"
+import { api, parseApiError } from "@/lib/api"
 
 type ModelOption = {
   value: string
@@ -64,15 +64,8 @@ export function SetupPage() {
       })
       navigate("/")
     } catch (err) {
-      const raw = err instanceof Error ? err.message : String(err)
-      let parsedError: { detail?: { field?: string; message: string } } | null = null
-      try { parsedError = JSON.parse(raw.replace(/^API error \d+: /, "")) } catch { /* ignore */ }
-      const detail = parsedError?.detail
-      setError(
-        detail && typeof detail === "object" && "message" in detail
-          ? `${detail.field ? `${detail.field}: ` : ""}${detail.message}`
-          : raw,
-      )
+      const detail = parseApiError(err)
+      setError(`${detail.field ? `${detail.field}: ` : ""}${detail.message}`)
     } finally {
       setSaving(false)
     }

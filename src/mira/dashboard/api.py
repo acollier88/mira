@@ -509,7 +509,7 @@ def set_models(body: ModelsUpdate) -> dict:
             raise HTTPException(
                 status_code=400,
                 detail={
-                    "field": str(first.get("loc", ("base_url",))[0]),
+                    "field": str(first.get("loc", ("llm",))[0]),
                     "message": _humanize_pydantic_message(first),
                 },
             ) from exc

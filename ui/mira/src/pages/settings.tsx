@@ -17,7 +17,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { api } from "@/lib/api"
+import { api, parseApiError } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
 
 export function SettingsPage() {
@@ -101,14 +101,9 @@ export function SettingsPage() {
       setModelsSaved(true)
       setTimeout(() => setModelsSaved(false), 2000)
     } catch (err) {
-      const raw = err instanceof Error ? err.message : String(err)
-      let parsedError: { detail?: { field?: string; message: string } } | null = null
-      try { parsedError = JSON.parse(raw.replace(/^API error \d+: /, "")) } catch { /* ignore */ }
-      const detail = parsedError?.detail
+      const detail = parseApiError(err)
       setModelError(
-        detail && typeof detail === "object" && "message" in detail
-          ? `${detail.field ? `${detail.field}: ` : ""}${detail.message}`
-          : raw,
+        `${detail.field ? `${detail.field}: ` : ""}${detail.message}`,
       )
     } finally {
       setSavingModels(false)
@@ -153,16 +148,8 @@ export function SettingsPage() {
       // so strip that prefix and JSON.parse the rest to recover the structured
       // detail. Regex-extracting the detail object choked on nested braces /
       // escaped quotes — full JSON.parse is the right tool.
-      const raw = err instanceof Error ? err.message : String(err)
-      // Try to parse the full error message as JSON to extract structured detail.
-      let parsedError: { detail?: { field?: string; message: string } } | null = null
-      try { parsedError = JSON.parse(raw.replace(/^API error \d+: /, "")) } catch { /* ignore */ }
-      const detail = parsedError?.detail
-      if (detail && typeof detail === "object" && "message" in detail) {
-        setFieldErrors({ [detail.field ?? "_global"]: detail.message })
-      } else {
-        setFieldErrors({ _global: raw })
-      }
+      const detail = parseApiError(err)
+      setFieldErrors({ [detail.field ?? "_global"]: detail.message })
     } finally {
       setSavingOverrides(false)
     }

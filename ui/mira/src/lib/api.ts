@@ -11,6 +11,26 @@ export interface ModelSettings {
   review_options: { value: string; label: string; recommended?: boolean }[]
 }
 
+export function parseApiError(
+  err: unknown,
+): { field?: string; message: string } {
+  const raw = err instanceof Error ? err.message : String(err)
+  try {
+    const parsed = JSON.parse(raw.replace(/^API error \d+: /, "")) as {
+      detail?: { field?: string; message?: string }
+    }
+    if (parsed?.detail?.message) {
+      return {
+        field: parsed.detail.field,
+        message: parsed.detail.message,
+      }
+    }
+  } catch {
+    // Fall through to the raw message below.
+  }
+  return { message: raw }
+}
+
 async function fetchJson<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { credentials: "include" })
   if (!res.ok) {

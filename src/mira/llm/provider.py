@@ -565,7 +565,8 @@ class LLMProvider:
             return content
 
         raise LLMError(
-            "LLM endpoint returned neither tool calls nor JSON content; verify OpenAI-compatible chat-completions support."
+            "LLM endpoint returned neither tool calls nor JSON content. "
+            "Verify OpenAI-compatible chat-completions support."
         )
 
     async def complete(
