@@ -256,3 +256,82 @@ class TestUsageProperty:
         assert usage["prompt_tokens"] == 100
         assert usage["completion_tokens"] == 50
         assert usage["total_tokens"] == 150
+
+
+class TestCustomEndpointSupport:
+    def test_non_openrouter_headers_skip_ranking_headers_and_auth_when_disabled(self):
+        config = LLMConfig(
+            model="test-model",
+            base_url="http://localhost:11434/v1",
+            api_key_env="",
+        )
+        provider = LLMProvider(config)
+
+        assert provider._build_headers() == {"Content-Type": "application/json"}
+
+    @pytest.mark.asyncio
+    async def test_json_mode_unsupported_retries_without_response_format(self):
+        config = LLMConfig(model="test-model", base_url="http://localhost:11434/v1", api_key_env="")
+        provider = LLMProvider(config)
+
+        calls: list[dict] = []
+
+        async def _side_effect(*args, **kwargs):
+            body = kwargs.get("json", {})
+            calls.append(body)
+            if len(calls) == 1:
+                return _mock_httpx_response({"error": {"message": "response_format not supported"}}, 400)
+            assert "response_format" not in body
+            assert "Return ONLY a valid JSON object" in body["messages"][-1]["content"]
+            return _mock_httpx_response(_make_response_json("{}"))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=_side_effect)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            result = await provider.complete([{"role": "user", "content": "hi"}], json_mode=True)
+
+        assert result == "{}"
+        assert len(calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_tool_calling_unsupported_retries_with_prompt_json(self):
+        config = LLMConfig(model="test-model", base_url="http://localhost:11434/v1", api_key_env="")
+        provider = LLMProvider(config)
+
+        calls: list[dict] = []
+
+        async def _side_effect(*args, **kwargs):
+            body = kwargs.get("json", {})
+            calls.append(body)
+            if len(calls) == 1:
+                return _mock_httpx_response({"error": {"message": "tools are not supported"}}, 400)
+            assert "tools" not in body
+            assert "Return ONLY a valid JSON object" in body["messages"][-1]["content"]
+            return _mock_httpx_response(_make_response_json('{"summary":"ok","comments":[]}'))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=_side_effect)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            result = await provider.complete_with_tools(
+                [{"role": "user", "content": "hi"}],
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "submit_review",
+                            "parameters": {"type": "object", "properties": {"summary": {"type": "string"}}},
+                        },
+                    }
+                ],
+            )
+
+        assert result == '{"summary":"ok","comments":[]}'
+        assert len(calls) == 2

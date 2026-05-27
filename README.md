@@ -134,9 +134,16 @@ Mira talks to OpenRouter under the hood, so any model OpenRouter supports works.
 | OpenAI (cheap) | `openai/gpt-4o-mini` |
 | Google | `google/gemini-2.5-pro` |
 
-Set `OPENROUTER_API_KEY` once; one key works across every provider. See [`src/mira/llm/models.json`](src/mira/llm/models.json) for the full registry of models Mira recognises (with pricing and per-purpose recommendations).
+Set `OPENROUTER_API_KEY` once; one key works across every provider. See [`src/mira/llm/models.json`](src/mira/llm/models.json) for the built-in registry of models Mira recognizes (with pricing and per-purpose recommendations). If you're using a custom OpenAI-compatible endpoint, you can also type any model ID manually in the dashboard or set it directly in `mira.yaml`.
 
-> **Coming soon:** direct adapters for **Anthropic**, **OpenAI**, **Google Vertex**, **Ollama**, and **vLLM**, for teams that already hold provider keys, run open-weights models in-house, or have data-residency rules that prevent traffic from flowing through OpenRouter.
+For self-hosted or direct-provider usage, point Mira at any OpenAI-compatible endpoint:
+
+```yaml
+llm:
+  model: "llama3.1:70b"
+  base_url: "http://localhost:11434/v1"  # Ollama / vLLM / SGLang / LiteLLM proxy
+  api_key_env: ""                        # empty = no Authorization header
+```
 
 **3. Install the app** on your repos. Every PR gets auto-reviewed.
 

@@ -494,8 +494,8 @@ def set_models(body: ModelsUpdate) -> dict:
     from pydantic import ValidationError
 
     from mira.config import LLMConfig, load_config
-    from mira.llm.registry import is_supported
     from mira.llm.provider import _is_openrouter
+    from mira.llm.registry import is_supported
 
     config = load_config()
     base_url = body.base_url if body.base_url is not None else config.llm.base_url

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -70,6 +71,14 @@ class TestLoadConfig:
         empty_file.write_text("")
         config = load_config(empty_file)
         assert config == MiraConfig()
+
+    def test_invalid_base_url_raises(self, sample_config_path: Path):
+        with pytest.raises(ConfigError, match="must be a valid http\\(s\\) URL"):
+            load_config(sample_config_path, {"llm.base_url": "not-a-url"})
+
+    def test_empty_model_raises(self, sample_config_path: Path):
+        with pytest.raises(ConfigError, match="must not be empty"):
+            load_config(sample_config_path, {"llm.model": "   "})
 
 
 class TestFindConfigFile:
@@ -169,3 +178,27 @@ class TestGlobalDefaults:
         )
         assert config.review.walkthrough is False
         assert config.review.walkthrough_sequence_diagram is True
+
+    def test_db_llm_settings_layer_over_global_defaults(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        global_file = tmp_path / "mira.yaml"
+        global_file.write_text(
+            "llm:\n"
+            "  base_url: https://openrouter.ai/api/v1\n"
+            "  api_key_env: OPENROUTER_API_KEY\n"
+        )
+        set_global_defaults(global_file)
+
+        db = SimpleNamespace(
+            get_global_review_overrides=dict,
+            get_llm_settings=lambda: {
+                "base_url": "http://localhost:11434/v1",
+                "api_key_env": "",
+            },
+        )
+        monkeypatch.setattr("mira.dashboard.api._app_db", db)
+
+        config = load_config()
+        assert config.llm.base_url == "http://localhost:11434/v1"
+        assert config.llm.api_key_env == ""
